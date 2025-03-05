@@ -1,0 +1,40 @@
+# Виртуальное окружение
+venv/
+env/
+ENV/
+.venv/
+
+# Конфигурации
+config.py
+
+# Данные
+data/
+
+# Кэши и временные файлы
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+.hypothesis/
+.pytest_cache/
+htmlcov/
+.tox/
+.nox/
+
+# Логи
+*.log
+*.sqlite3-journal
+
+# Локальные настройки IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
