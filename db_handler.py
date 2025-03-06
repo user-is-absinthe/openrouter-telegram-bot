@@ -1,247 +1,417 @@
+import os
 import sqlite3
 import logging
-import os
 from datetime import datetime
 
+# Настройка логирования
 logger = logging.getLogger(__name__)
 
 
 class DBHandler:
-    def __init__(self, db_path="openrouter_bot.db"):
-        """Инициализация обработчика базы данных SQLite"""
+    def __init__(self, db_path):
+        """Инициализация подключения к базе данных."""
         self.db_path = db_path
-        self.connection = None
+        self.conn = None
+
+        # Создаем директорию для базы данных, если она не существует
+        os.makedirs(os.path.dirname(self.db_path), exist_ok=True)
+
+        # Подключение к базе данных
         self.connect()
+
+        # Создание необходимых таблиц, если они не существуют
         self.create_tables()
 
+        # Обновление схемы базы данных, если необходимо
+        self.update_schema()
+
     def connect(self):
-        """Установить соединение с базой данных"""
+        """Подключение к базе данных SQLite."""
         try:
-            # Проверяем, существует ли директория для базы данных
-            db_dir = os.path.dirname(self.db_path)
-            if db_dir and not os.path.exists(db_dir):
-                os.makedirs(db_dir)
-
-            self.connection = sqlite3.connect(self.db_path, check_same_thread=False)
-            # Настраиваем возврат строк в виде словарей
-            self.connection.row_factory = sqlite3.Row
-            logger.info(f"Подключение к SQLite базе данных '{self.db_path}' установлено")
-        except sqlite3.Error as err:
-            logger.error(f"Ошибка при подключении к базе данных: {err}")
-            raise
-
-    def check_connection(self):
-        """Проверяет и восстанавливает соединение с БД"""
-        try:
-            # Для SQLite просто проверяем, что соединение существует
-            if self.connection is None:
-                logger.warning("Соединение с базой данных потеряно. Повторное подключение...")
-                self.connect()
-
-            # Проверяем соединение простым запросом
-            cursor = self.connection.cursor()
-            cursor.execute("SELECT 1")
-            cursor.close()
-        except sqlite3.Error as e:
-            logger.error(f"Ошибка при проверке соединения: {e}")
-            self.connect()
+            self.conn = sqlite3.connect(self.db_path, check_same_thread=False)
+            self.conn.execute("PRAGMA foreign_keys = ON")
+        except Exception as e:
+            logger.error(f"Ошибка подключения к базе данных: {e}")
 
     def create_tables(self):
-        """Создает таблицы, если они не существуют"""
+        """Создание необходимых таблиц."""
         try:
-            self.check_connection()
-            cursor = self.connection.cursor()
+            cursor = self.conn.cursor()
 
-            # Создание таблицы Users
+            # Создание таблицы пользователей
             cursor.execute('''
-                CREATE TABLE IF NOT EXISTS Users (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    id_chat INTEGER NOT NULL,
-                    id_user INTEGER NOT NULL,
-                    first_name TEXT,
-                    last_name TEXT,
-                    username TEXT,
-                    is_active INTEGER DEFAULT 1,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    UNIQUE(id_user)
+            CREATE TABLE IF NOT EXISTS users (
+                id INTEGER PRIMARY KEY,
+                id_chat INTEGER NOT NULL,
+                id_user INTEGER NOT NULL,
+                first_name TEXT,
+                last_name TEXT,
+                username TEXT,
+                register_date DATETIME DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(id_chat, id_user)
+            )
+            ''')
+
+            # Создание таблицы диалогов с полем displayed
+            cursor.execute('''
+            CREATE TABLE IF NOT EXISTS dialogs (
+                id INTEGER PRIMARY KEY,
+                id_chat INTEGER NOT NULL,
+                id_user INTEGER NOT NULL,
+                number_dialog INTEGER NOT NULL,
+                model TEXT,
+                model_id TEXT,
+                user_ask TEXT,
+                model_answer TEXT,
+                ask_date DATETIME DEFAULT CURRENT_TIMESTAMP,
+                displayed INTEGER DEFAULT 1,
+                FOREIGN KEY (id_chat, id_user) REFERENCES users (id_chat, id_user)
+            )
+            ''')
+
+            # Создание таблицы моделей
+            cursor.execute('''
+            CREATE TABLE IF NOT EXISTS models (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                created INTEGER,
+                description TEXT,
+                rus_description TEXT,
+                context_length INTEGER,
+                modality TEXT,
+                tokenizer TEXT,
+                instruct_type TEXT,
+                prompt_price TEXT,
+                completion_price TEXT,
+                image_price TEXT,
+                request_price TEXT,
+                provider_context_length INTEGER,
+                is_moderated INTEGER,
+                is_free INTEGER,
+                top_model INTEGER DEFAULT 0,
+                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            )
+            ''')
+
+            self.conn.commit()
+        except Exception as e:
+            logger.error(f"Ошибка создания таблиц: {e}")
+
+    def update_schema(self):
+        """Обновление схемы базы данных при необходимости."""
+        try:
+            cursor = self.conn.cursor()
+
+            # Проверяем, существует ли колонка 'displayed' в таблице 'dialogs'
+            cursor.execute("PRAGMA table_info(dialogs)")
+            columns = [column[1] for column in cursor.fetchall()]
+
+            if 'displayed' not in columns:
+                logger.info("Добавление колонки 'displayed' в таблицу 'dialogs'")
+                cursor.execute("ALTER TABLE dialogs ADD COLUMN displayed INTEGER DEFAULT 1")
+                self.conn.commit()
+
+                # Устанавливаем значение по умолчанию для существующих записей
+                cursor.execute("UPDATE dialogs SET displayed = 1 WHERE displayed IS NULL")
+                self.conn.commit()
+
+            # Проверяем, существует ли таблица 'models'
+            cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='models'")
+            if not cursor.fetchone():
+                logger.info("Создание таблицы 'models'")
+                cursor.execute('''
+                CREATE TABLE models (
+                    id TEXT PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    created INTEGER,
+                    description TEXT,
+                    rus_description TEXT,
+                    context_length INTEGER,
+                    modality TEXT,
+                    tokenizer TEXT,
+                    instruct_type TEXT,
+                    prompt_price TEXT,
+                    completion_price TEXT,
+                    image_price TEXT,
+                    request_price TEXT,
+                    provider_context_length INTEGER,
+                    is_moderated INTEGER,
+                    is_free INTEGER,
+                    top_model INTEGER DEFAULT 0,
+                    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
                 )
-            ''')
+                ''')
+                self.conn.commit()
+        except Exception as e:
+            logger.error(f"Ошибка обновления схемы базы данных: {e}")
 
-            # Создание таблицы Dialogs
-            cursor.execute('''
-                CREATE TABLE IF NOT EXISTS Dialogs (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    id_chat INTEGER NOT NULL,
-                    id_user INTEGER NOT NULL,  -- Добавляем id пользователя для группировки диалогов по пользователям
-                    number_dialog INTEGER NOT NULL,
-                    last_message INTEGER DEFAULT 0,
-                    model TEXT NOT NULL,       -- Название модели для отображения
-                    model_id TEXT NOT NULL,    -- Полный ID модели для API
-                    user_ask TEXT NOT NULL,
-                    model_answered TEXT,
-                    timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    FOREIGN KEY (id_user) REFERENCES Users(id_user)
-                )
-            ''')
-
-            # Создаем индексы для быстрого поиска диалогов
-            cursor.execute('''
-                CREATE INDEX IF NOT EXISTS idx_chat_dialog ON Dialogs (id_chat, number_dialog)
-            ''')
-
-            cursor.execute('''
-                CREATE INDEX IF NOT EXISTS idx_user_dialog ON Dialogs (id_user, number_dialog)
-            ''')
-
-            self.connection.commit()
-            cursor.close()
-            logger.info("Таблицы успешно созданы или уже существуют")
-        except sqlite3.Error as err:
-            logger.error(f"Ошибка при создании таблиц: {err}")
-            raise
+    def close(self):
+        """Закрытие соединения с базой данных."""
+        if self.conn:
+            self.conn.close()
 
     def register_user(self, id_chat, id_user, first_name, last_name, username):
-        """Регистрирует или обновляет пользователя в БД"""
+        """Регистрирует пользователя или обновляет его информацию."""
         try:
-            self.check_connection()
-            cursor = self.connection.cursor()
+            cursor = self.conn.cursor()
 
-            # Проверяем, существует ли пользователь
-            cursor.execute(
-                "SELECT id FROM Users WHERE id_user = ?",
-                (id_user,)
-            )
-            user = cursor.fetchone()
+            # Проверка, существует ли пользователь
+            cursor.execute("SELECT id FROM users WHERE id_chat = ? AND id_user = ?", (id_chat, id_user))
+            result = cursor.fetchone()
 
-            if user:
-                # Обновляем данные пользователя
+            if result:
+                # Обновление существующего пользователя
                 cursor.execute(
-                    """
-                    UPDATE Users 
-                    SET id_chat = ?, first_name = ?, last_name = ?, username = ?, is_active = 1
-                    WHERE id_user = ?
-                    """,
-                    (id_chat, first_name, last_name, username, id_user)
+                    "UPDATE users SET first_name = ?, last_name = ?, username = ? WHERE id_chat = ? AND id_user = ?",
+                    (first_name, last_name, username, id_chat, id_user)
                 )
             else:
-                # Создаем нового пользователя
+                # Регистрация нового пользователя
                 cursor.execute(
-                    """
-                    INSERT INTO Users (id_chat, id_user, first_name, last_name, username) 
-                    VALUES (?, ?, ?, ?, ?)
-                    """,
+                    "INSERT INTO users (id_chat, id_user, first_name, last_name, username) VALUES (?, ?, ?, ?, ?)",
                     (id_chat, id_user, first_name, last_name, username)
                 )
 
-            self.connection.commit()
-            cursor.close()
-            logger.info(f"Пользователь {id_user} зарегистрирован/обновлен в базе данных")
-        except sqlite3.Error as err:
-            logger.error(f"Ошибка при регистрации пользователя: {err}")
+            self.conn.commit()
+        except Exception as e:
+            logger.error(f"Ошибка при регистрации пользователя: {e}")
 
-    def mark_user_inactive(self, id_user):
-        """Отмечает пользователя как неактивного (заблокировавшего бота)"""
+    def log_dialog(self, id_chat, id_user, number_dialog, model, model_id, user_ask, model_answer=None, displayed=1):
+        """Логирует диалог."""
         try:
-            self.check_connection()
-            cursor = self.connection.cursor()
-
+            cursor = self.conn.cursor()
             cursor.execute(
-                "UPDATE Users SET is_active = 0 WHERE id_user = ?",
-                (id_user,)
+                "INSERT INTO dialogs (id_chat, id_user, number_dialog, model, model_id, user_ask, model_answer, displayed) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (id_chat, id_user, number_dialog, model, model_id, user_ask, model_answer, displayed)
             )
-
-            self.connection.commit()
-            cursor.close()
-            logger.info(f"Пользователь {id_user} отмечен как неактивный")
-        except sqlite3.Error as err:
-            logger.error(f"Ошибка при обновлении статуса пользователя: {err}")
-
-    def get_next_dialog_number(self, id_user):
-        """Получает следующий номер диалога для пользователя"""
-        try:
-            self.check_connection()
-            cursor = self.connection.cursor()
-
-            cursor.execute(
-                "SELECT MAX(number_dialog) as max_dialog FROM Dialogs WHERE id_user = ?",
-                (id_user,)
-            )
-            result = cursor.fetchone()
-            cursor.close()
-
-            if result is None or result["max_dialog"] is None:
-                return 1
-            else:
-                return result["max_dialog"] + 1
-        except sqlite3.Error as err:
-            logger.error(f"Ошибка при получении номера диалога: {err}")
-            return 1
-
-    def mark_last_message(self, id_user, number_dialog):
-        """Отмечает последнее сообщение диалога"""
-        try:
-            self.check_connection()
-            cursor = self.connection.cursor()
-
-            cursor.execute(
-                """
-                UPDATE Dialogs 
-                SET last_message = 1
-                WHERE id_user = ? AND number_dialog = ?
-                """,
-                (id_user, number_dialog)
-            )
-
-            self.connection.commit()
-            cursor.close()
-            logger.info(f"Диалог {number_dialog} пользователя {id_user} отмечен как завершенный")
-        except sqlite3.Error as err:
-            logger.error(f"Ошибка при маркировке последнего сообщения: {err}")
-
-    def log_dialog(self, id_chat, id_user, number_dialog, model, model_id, user_ask, model_answered=None,
-                   last_message=0):
-        """Логирует диалог в базу данных с полным ID модели"""
-        try:
-            self.check_connection()
-            cursor = self.connection.cursor()
-
-            cursor.execute(
-                """
-                INSERT INTO Dialogs (id_chat, id_user, number_dialog, model, model_id, user_ask, model_answered, last_message)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (id_chat, id_user, number_dialog, model, model_id, user_ask, model_answered, last_message)
-            )
-
-            dialog_id = cursor.lastrowid
-
-            self.connection.commit()
-            cursor.close()
-            logger.info(f"Диалог {number_dialog} пользователя {id_user} сохранен в БД")
-            return dialog_id
-        except sqlite3.Error as err:
-            logger.error(f"Ошибка при логировании диалога: {err}")
+            self.conn.commit()
+            return cursor.lastrowid  # Возвращаем ID вставленной записи
+        except Exception as e:
+            logger.error(f"Ошибка при логировании диалога: {e}")
             return None
 
-    def update_model_answer(self, dialog_id, model_answered):
-        """Обновляет ответ модели для указанного диалога"""
+    def update_model_answer(self, dialog_id, model_answer, displayed=1):
+        """Обновляет ответ модели в существующей записи диалога."""
         try:
-            self.check_connection()
-            cursor = self.connection.cursor()
-
+            cursor = self.conn.cursor()
             cursor.execute(
-                "UPDATE Dialogs SET model_answered = ? WHERE id = ?",
-                (model_answered, dialog_id)
+                "UPDATE dialogs SET model_answer = ?, displayed = ? WHERE id = ?",
+                (model_answer, displayed, dialog_id)
             )
+            self.conn.commit()
+        except Exception as e:
+            logger.error(f"Ошибка при обновлении ответа модели: {e}")
 
-            self.connection.commit()
-            cursor.close()
-            logger.info(f"Ответ модели для диалога {dialog_id} обновлен")
-        except sqlite3.Error as err:
-            logger.error(f"Ошибка при обновлении ответа модели: {err}")
+    def get_next_dialog_number(self, id_user):
+        """Получает следующий номер диалога для пользователя."""
+        try:
+            cursor = self.conn.cursor()
+            cursor.execute(
+                "SELECT MAX(number_dialog) FROM dialogs WHERE id_user = ?",
+                (id_user,)
+            )
+            result = cursor.fetchone()[0]
 
-    def close(self):
-        """Закрывает соединение с базой данных"""
-        if self.connection:
-            self.connection.close()
-            logger.info("Соединение с базой данных закрыто")
+            # Если это первый диалог пользователя
+            if result is None:
+                return 1
+
+            # Иначе увеличиваем номер диалога на 1
+            return result + 1
+        except Exception as e:
+            logger.error(f"Ошибка при получении номера диалога: {e}")
+            return 1  # В случае ошибки возвращаем 1
+
+    def mark_last_message(self, id_user, number_dialog):
+        """Отмечает, что текущий диалог завершен."""
+        try:
+            cursor = self.conn.cursor()
+            # Фиктивная операция для маркировки завершения диалога
+            # В будущем можно добавить специальное поле в таблицу
+            cursor.execute(
+                "SELECT MAX(id) FROM dialogs WHERE id_user = ? AND number_dialog = ?",
+                (id_user, number_dialog)
+            )
+            self.conn.commit()
+        except Exception as e:
+            logger.error(f"Ошибка при маркировке завершения диалога: {e}")
+
+    def mark_previous_answers_as_inactive(self, dialog_id):
+        """Помечает предыдущий ответ модели как неотображаемый."""
+        try:
+            cursor = self.conn.cursor()
+            # Обновляем только текущий ответ как неотображаемый
+            cursor.execute(
+                "UPDATE dialogs SET displayed = 0 WHERE id = ?",
+                (dialog_id,)
+            )
+            self.conn.commit()
+            logger.info(f"Ответ {dialog_id} помечен как неактивный")
+            return True
+        except Exception as e:
+            logger.error(f"Ошибка при обновлении статуса ответа: {e}")
+            return False
+
+    # Методы для работы с моделями
+    def save_model(self, model_data):
+        """Сохраняет или обновляет информацию о модели в БД."""
+        try:
+            # Извлекаем данные из JSON
+            model_id = model_data.get("id")
+            name = model_data.get("name")
+            created = model_data.get("created")
+            description = model_data.get("description")
+            context_length = model_data.get("context_length")
+
+            # Извлекаем данные из вложенных структур
+            architecture = model_data.get("architecture", {})
+            modality = architecture.get("modality")
+            tokenizer = architecture.get("tokenizer")
+            instruct_type = architecture.get("instruct_type")
+
+            pricing = model_data.get("pricing", {})
+            prompt_price = pricing.get("prompt")
+            completion_price = pricing.get("completion")
+            image_price = pricing.get("image")
+            request_price = pricing.get("request")
+
+            top_provider = model_data.get("top_provider", {})
+            provider_context_length = top_provider.get("context_length")
+            is_moderated = 1 if top_provider.get("is_moderated") else 0
+
+            # Проверяем, является ли модель бесплатной
+            is_free = 1 if model_id.endswith(":free") or (prompt_price == "0" and completion_price == "0") else 0
+
+            cursor = self.conn.cursor()
+
+            # Проверяем, есть ли уже такая модель в БД
+            cursor.execute("SELECT id, rus_description, top_model FROM models WHERE id = ?", (model_id,))
+            existing = cursor.fetchone()
+
+            if existing:
+                # Сохраняем текущие значения rus_description и top_model
+                rus_description = existing[1]
+                top_model = existing[2]
+
+                # Обновляем существующую запись, сохраняя rus_description и top_model
+                cursor.execute("""
+                UPDATE models SET 
+                    name = ?, 
+                    created = ?, 
+                    description = ?,
+                    context_length = ?,
+                    modality = ?,
+                    tokenizer = ?,
+                    instruct_type = ?,
+                    prompt_price = ?,
+                    completion_price = ?,
+                    image_price = ?,
+                    request_price = ?,
+                    provider_context_length = ?,
+                    is_moderated = ?,
+                    is_free = ?,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+                """, (
+                    name, created, description, context_length, modality, tokenizer,
+                    instruct_type, prompt_price, completion_price, image_price,
+                    request_price, provider_context_length, is_moderated, is_free,
+                    model_id
+                ))
+            else:
+                # Добавляем новую запись
+                cursor.execute("""
+                INSERT INTO models (
+                    id, name, created, description, rus_description,
+                    context_length, modality, tokenizer, instruct_type,
+                    prompt_price, completion_price, image_price, request_price,
+                    provider_context_length, is_moderated, is_free, top_model
+                ) VALUES (?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
+                """, (
+                    model_id, name, created, description, context_length, modality, tokenizer,
+                    instruct_type, prompt_price, completion_price, image_price,
+                    request_price, provider_context_length, is_moderated, is_free
+                ))
+
+            self.conn.commit()
+            return True
+
+        except Exception as e:
+            logger.error(f"Ошибка при сохранении модели {model_data.get('id')}: {e}")
+            return False
+
+    def get_models(self, only_free=False, only_top=False):
+        """Получает список моделей из БД с возможностью фильтрации."""
+        try:
+            cursor = self.conn.cursor()
+
+            query = "SELECT id, name, description, rus_description, context_length, is_free, top_model FROM models"
+            conditions = []
+            params = []
+
+            if only_free:
+                conditions.append("is_free = 1")
+
+            if only_top:
+                conditions.append("top_model = 1")
+
+            if conditions:
+                query += " WHERE " + " AND ".join(conditions)
+
+            # Сортировка: сначала топовые, затем по имени
+            query += " ORDER BY top_model DESC, name ASC"
+
+            cursor.execute(query, params)
+
+            models = []
+            for row in cursor.fetchall():
+                model = {
+                    "id": row[0],
+                    "name": row[1],
+                    "description": row[3] if row[3] else row[2],  # Используем rus_description, если есть
+                    "context_length": row[4],
+                    "is_free": bool(row[5]),
+                    "top_model": bool(row[6])
+                }
+                models.append(model)
+
+            return models
+
+        except Exception as e:
+            logger.error(f"Ошибка при получении списка моделей: {e}")
+            return []
+
+    def update_model_description(self, model_id, rus_description, top_model=None):
+        """Обновляет русское описание и/или статус топ-модели."""
+        try:
+            cursor = self.conn.cursor()
+
+            # Формируем запрос в зависимости от того, что обновляем
+            if top_model is not None:
+                cursor.execute(
+                    "UPDATE models SET rus_description = ?, top_model = ? WHERE id = ?",
+                    (rus_description, 1 if top_model else 0, model_id)
+                )
+            else:
+                cursor.execute(
+                    "UPDATE models SET rus_description = ? WHERE id = ?",
+                    (rus_description, model_id)
+                )
+
+            self.conn.commit()
+            return True
+
+        except Exception as e:
+            logger.error(f"Ошибка при обновлении описания модели {model_id}: {e}")
+            return False
+
+    def clear_top_models(self):
+        """Сбрасывает статус топ-модели для всех моделей."""
+        try:
+            cursor = self.conn.cursor()
+            cursor.execute("UPDATE models SET top_model = 0")
+            self.conn.commit()
+            return True
+        except Exception as e:
+            logger.error(f"Ошибка при сбросе статуса топ-моделей: {e}")
+            return False

@@ -32,23 +32,28 @@
 
 3. Установите необходимые зависимости:
    ```bash
-   pip install python-telegram-bot requests
+   pip install python-telegram-bot requests md2tgmd
    ```
 
 4. Создайте и настройте файл `config.py`:
    ```python
-   # Токен вашего бота в Telegram (получите его у @BotFather)
-   TELEGRAM_TOKEN = "your_telegram_bot_token"
-
-   # API ключ OpenRouter (получите на сайте https://openrouter.ai/)
-   OPENROUTER_API_KEY = "your_openrouter_api_key"
-
-   # Информация для заголовков запросов
+   # Токены и ключи API
+   TELEGRAM_BOT_TOKEN = "tg_token"
+   OPENROUTER_API_KEY = "op_token"
+   
+   DB_PATH = r"data/openrouter_bot.db"
+   
+   # Настройки сайта для OpenRouter
    SITE_URL = "https://github.com/user-is-absinthe/openrouter-telegram-bot"
    SITE_NAME = "OpenRouter Telegram Bot"
+   
+   # Настройки обновления сообщений
+   STREAM_UPDATE_INTERVAL = 1.5  # Интервал обновления сообщений в секундах при потоковой передаче
+   
+   # Добавляем поле для ID администраторов (список строк)
+   ADMIN_IDS = ["YOUR_ADMIN_ID_1", "YOUR_ADMIN_ID_2"]
+   # ADMIN_IDS = ["YOUR_ADMIN_ID_2"]
 
-   # Интервал обновления потокового ответа в секундах
-   STREAM_UPDATE_INTERVAL = 0.5
    ```
 
 5. Запустите бота:
@@ -75,7 +80,7 @@
 ## Чеклист для будущих улучшений
 
 - [ ] Вывод "мыслей" думающих моделей
-- [ ] Исправить форматирование markdown для Telegram
+- [x] Исправить форматирование markdown для Telegram
 - [ ] Добавить моделям контекст для продолжения диалога
 - [ ] Добавить возможность сохранять любимые модели
 - [ ] Добавить статистику использования моделей
