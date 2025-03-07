@@ -415,3 +415,103 @@ class DBHandler:
         except Exception as e:
             logger.error(f"Ошибка при сбросе статуса топ-моделей: {e}")
             return False
+
+    def translate_model_descriptions(self, model_id=None):
+        """
+        Переводит описания моделей на русский язык, если поле rus_description пусто.
+
+        Args:
+            model_id: ID конкретной модели для перевода или None для всех моделей с пустым rus_description
+
+        Returns:
+            Словарь с результатами перевода {model_id: status}
+        """
+        try:
+            cursor = self.conn.cursor()
+
+            if model_id:
+                # Переводим конкретную модель
+                cursor.execute(
+                    "SELECT id, description FROM models WHERE id = ?",
+                    (model_id,)
+                )
+            else:
+                # Ищем все модели с пустым rus_description
+                cursor.execute(
+                    "SELECT id, description FROM models WHERE rus_description IS NULL OR rus_description = ''"
+                )
+
+            models_to_translate = cursor.fetchall()
+
+            results = {}
+            for model_data in models_to_translate:
+                model_id = model_data[0]
+                description = model_data[1]
+
+                if not description:
+                    results[model_id] = "no_description"
+                    continue
+
+                # Эта функция будет реализована в основном файле бота
+                # Здесь она будет вызываться извне
+                results[model_id] = "pending"
+
+            return results
+
+        except Exception as e:
+            logger.error(f"Ошибка при подготовке к переводу описаний моделей: {e}")
+            return {}
+
+    def get_dialog_history(self, id_user, number_dialog, limit=None):
+        """
+        Получает историю диалога пользователя.
+
+        Args:
+            id_user: ID пользователя
+            number_dialog: Номер диалога
+            limit: Максимальное количество сообщений для возврата (None = все сообщения)
+
+        Returns:
+            Список словарей с сообщениями диалога [{"role": "user/assistant", "content": "..."}]
+        """
+        try:
+            cursor = self.conn.cursor()
+
+            query = """
+            SELECT user_ask, model_answer 
+            FROM dialogs 
+            WHERE id_user = ? AND number_dialog = ? AND displayed = 1 
+            ORDER BY id ASC
+            """
+
+            params = [id_user, number_dialog]
+
+            if limit:
+                query += " LIMIT ?"
+                params.append(limit)
+
+            cursor.execute(query, params)
+            rows = cursor.fetchall()
+
+            history = []
+            for row in rows:
+                # Добавляем сообщение пользователя
+                if row[0]:  # user_ask
+                    history.append({
+                        "role": "user",
+                        "content": row[0]
+                    })
+
+                # Добавляем ответ модели
+                if row[1]:  # model_answer
+                    history.append({
+                        "role": "assistant",
+                        "content": row[1]
+                    })
+
+            return history
+
+        except Exception as e:
+            logger.error(f"Ошибка при получении истории диалога: {e}")
+            return []
+
