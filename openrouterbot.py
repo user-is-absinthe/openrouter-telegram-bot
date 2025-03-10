@@ -87,50 +87,141 @@ def fetch_and_update_models(context):
     return False
 
 
-async def get_free_models(context=None):
-    """Получает список бесплатных моделей."""
-    # Пытаемся получить контекст
-    if not context and 'application' in globals():
-        global application
-        if hasattr(application, 'bot_data'):
-            context = application
-
-    if context:
-        db = context.bot_data.get("db")
-        if db:
-            return db.get_models(only_free=True)
-
-    # Если не удалось получить из БД, возвращаем стандартный список
-    return [
-        {
-            "id": "meta-llama/llama-3-8b-instruct:free",
-            "name": "Meta: Llama 3 8B Instruct",
-            "description": "Llama 3 8B – компактная модель для диалогов и создания контента"
-        },
-        {
-            "id": "anthropic/claude-3-haiku:free",
-            "name": "Anthropic: Claude 3 Haiku",
-            "description": "Claude 3 Haiku – самая быстрая и доступная модель в семействе Claude 3"
-        },
-        {
-            "id": "google/gemma-7b-it:free",
-            "name": "Google: Gemma 7B IT",
-            "description": "Gemma 7B – легкая и мощная модель для работы с текстом"
-        }
-    ]
-
-
-async def translate_with_openrouter(text_to_translate, db, model_id=None):
+def select_translation_model(db):
     """
-    Переводит текст на русский язык с помощью OpenRouter API.
+    Выбирает модель для перевода по заданным критериям:
+    1. Модель должна быть бесплатной
+    2. Предпочтительно содержать "Gemini" в названии
+    3. В случае отсутствия Gemini, выбирается любая бесплатная модель
 
     Args:
-        text_to_translate: Текст для перевода
-        db: Экземпляр DBHandler для доступа к базе данных
-        model_id: ID модели для использования (по умолчанию Gemini Flash 2.0)
+        db: Объект базы данных для доступа к моделям
 
     Returns:
-        Переведенный текст или None в случае ошибки
+        str: ID модели для перевода или None, если подходящая модель не найдена
+    """
+    try:
+        # Получаем все бесплатные модели
+        free_models = db.get_models(only_free=True)
+
+        if not free_models:
+            logger.error("Не найдено бесплатных моделей для перевода")
+            return None
+
+        # Ищем модель Gemini среди бесплатных
+        gemini_models = [model for model in free_models
+                         if "gemini" in model["id"].lower() or "gemini" in model["name"].lower()]
+
+        if gemini_models:
+            # Если есть несколько моделей Gemini, предпочитаем более новые версии.
+            # Сортируем по убыванию, чтобы более новые версии были вначале
+            # (например, gemini-pro-2.0 должен идти перед gemini-pro-1.5)
+            gemini_models.sort(
+                key=lambda model: model["id"] + model["name"],
+                reverse=True
+            )
+
+            logger.info(f"Выбрана модель Gemini для перевода: {gemini_models[0]['id']}")
+            return gemini_models[0]["id"]
+
+        # Если Gemini не найдена, берем первую бесплатную модель
+        logger.info(f"Модель Gemini не найдена, используем: {free_models[0]['id']}")
+        return free_models[0]["id"]
+
+    except Exception as e:
+        logger.error(f"Ошибка при выборе модели для перевода: {e}")
+        return None
+
+
+async def translate_model_description(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Переводит описание указанной модели на русский язык."""
+    user_id = update.effective_user.id
+
+    # Проверяем, является ли пользователь админом
+    if str(user_id) not in config.ADMIN_IDS:
+        await update.message.reply_text("⚠️ Эта команда доступна только администраторам.")
+        return
+
+    # Получаем ID модели из аргументов команды
+    args = context.args
+    if not args:
+        await update.message.reply_text(
+            "Пожалуйста, укажите ID модели для перевода. Например: /translate_description meta/llama-3-8b-instruct")
+        return
+
+    model_id = args[0]
+
+    # Получаем доступ к БД
+    db = context.bot_data.get("db")
+    if not db:
+        await update.message.reply_text("⚠️ Ошибка доступа к базе данных.")
+        return
+
+    # Проверяем существование модели
+    cursor = db.conn.cursor()
+    cursor.execute("SELECT id, description FROM models WHERE id = ?", (model_id,))
+    model = cursor.fetchone()
+
+    if not model:
+        await update.message.reply_text(f"⚠️ Модель с ID '{model_id}' не найдена в базе данных.")
+        return
+
+    description = model[1]
+
+    if not description:
+        await update.message.reply_text(f"⚠️ Модель '{model_id}' не имеет описания для перевода.")
+        return
+
+    # Сообщаем о начале перевода
+    message = await update.message.reply_text(f"🔄 Начинаю перевод описания модели '{model_id}'...")
+
+    # Выбираем модель для перевода
+    translation_model = select_translation_model(db)
+
+    if not translation_model:
+        await message.edit_text("⚠️ Не удалось найти подходящую модель для перевода.")
+        return
+
+    # Запрос на перевод через выбранную модель
+    try:
+        await message.edit_text(f"🔄 Перевожу описание модели '{model_id}' с помощью '{translation_model}'...")
+
+        # Формируем запрос на перевод
+        original_prompt = f"""Переведи следующее описание AI модели с английского на русский язык. 
+Сохрани форматирование и технические термины, но сделай текст понятным русскоязычному пользователю:
+
+{description}"""
+
+        # Получаем перевод
+        translation = await generate_ai_response(
+            original_prompt,
+            translation_model,
+            stream=False
+        )
+
+        # Сохраняем перевод в базе данных
+        if translation:
+            db.set_model_description_ru(model_id, translation)
+            await message.edit_text(f"✅ Перевод описания модели '{model_id}' завершен и сохранен.")
+        else:
+            await message.edit_text(f"⚠️ Не удалось получить перевод для модели '{model_id}'.")
+
+    except Exception as e:
+        logger.error(f"Ошибка при переводе описания модели: {e}")
+        await message.edit_text(f"⚠️ Ошибка при переводе описания модели: {str(e)}")
+
+
+async def generate_ai_response(prompt, model_id, stream=True):
+    """
+    Генерирует ответ от AI модели через OpenRouter API.
+
+    Args:
+        prompt: Текстовый запрос
+        model_id: ID модели для использования
+        stream: Нужно ли использовать потоковую передачу
+
+    Returns:
+        Ответ модели или None в случае ошибки
     """
     url = "https://openrouter.ai/api/v1/chat/completions"
     headers = {
@@ -140,162 +231,39 @@ async def translate_with_openrouter(text_to_translate, db, model_id=None):
         "X-Title": config.SITE_NAME,
     }
 
-    # Если модель не указана, используем Gemini Flash 2.0 по умолчанию
-    if not model_id:
-        model_id = "google/gemini-flash-2-0-experimental:free"
-
-    # Формируем промпт для перевода
-    prompt = f"Переведи описание на русский язык: {text_to_translate}"
-
-    # Формируем payload
     payload = {
         "model": model_id,
         "messages": [{"role": "user", "content": prompt}],
-        "stream": False
+        "stream": stream
     }
 
     try:
-        response = requests.post(url, headers=headers, json=payload, timeout=30)
+        response = requests.post(url, headers=headers, json=payload, timeout=60)
 
         if response.status_code != 200:
-            # Проверяем наличие ошибки квоты
-            error_data = response.json()
-            error_message = error_data.get('error', {}).get('message', '')
-            error_code = error_data.get('error', {}).get('code', 0)
-
-            # Проверяем наличие ошибки квоты (код 429)
-            if error_code == 429:
-                metadata = error_data.get('error', {}).get('metadata', {})
-                raw_error = metadata.get('raw', '')
-                provider_name = metadata.get('provider_name', '')
-
-                logger.warning(f"Ошибка квоты у провайдера {provider_name}: {error_message}")
-                logger.debug(f"Подробная ошибка: {raw_error}")
-
-                # Получаем следующую доступную бесплатную модель
-                next_model = get_next_free_model(db, model_id)
-
-                if next_model and next_model != model_id:
-                    logger.info(f"Переключаюсь на модель {next_model}")
-                    # Рекурсивно вызываем функцию с новой моделью
-                    return await translate_with_openrouter(text_to_translate, db, next_model)
-                else:
-                    logger.error("Не удалось найти альтернативную модель")
-                    return None
-
-            # Другие ошибки
             logger.error(f"Ошибка OpenRouter API: {response.status_code} - {response.text}")
             return None
 
-        response_data = response.json()
+        # Для неспотоковой передачи извлекаем текст
+        if not stream:
+            response_data = response.json()
 
-        # Извлекаем переведенный текст из ответа
-        if (response_data and 'choices' in response_data
-                and len(response_data['choices']) > 0
-                and 'message' in response_data['choices'][0]
-                and 'content' in response_data['choices'][0]['message']):
+            if (response_data and 'choices' in response_data
+                    and len(response_data['choices']) > 0
+                    and 'message' in response_data['choices'][0]
+                    and 'content' in response_data['choices'][0]['message']):
 
-            translated_text = response_data['choices'][0]['message']['content']
-
-            # Очищаем возможные артефакты перевода
-            if "Переведи описание на русский язык:" in translated_text:
-                translated_text = translated_text.split(":", 1)[1].strip()
-
-            return translated_text
+                return response_data['choices'][0]['message']['content']
+            else:
+                logger.error("Неожиданный формат ответа от OpenRouter API")
+                return None
         else:
-            logger.error("Неожиданный формат ответа от OpenRouter API")
-            logger.error(f"Ответ: {response_data}")
+            # Для потоковой передачи (неприменимо в этой функции)
             return None
 
     except Exception as e:
         logger.error(f"Ошибка при запросе к OpenRouter API: {e}")
         return None
-
-
-async def translate_all_models(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Переводит описания всех моделей, независимо от наличия текущего перевода."""
-    user_id = update.effective_user.id
-
-    # Проверяем, является ли пользователь админом
-    if str(user_id) not in config.ADMIN_IDS:
-        await update.message.reply_text("У вас нет прав для использования этой команды.")
-        return
-
-    # Получаем доступ к БД
-    db = context.bot_data.get("db")
-    if not db:
-        await update.message.reply_text("Ошибка доступа к базе данных.")
-        return
-
-    # Отправляем сообщение о начале обновления
-    message = await update.message.reply_text("Начинаю перевод всех описаний моделей...")
-
-    # Получаем список всех моделей
-    cursor = db.conn.cursor()
-    cursor.execute("SELECT id, description FROM models WHERE description IS NOT NULL AND description != ''")
-
-    models_to_translate = cursor.fetchall()
-
-    if not models_to_translate:
-        await message.edit_text("Нет моделей для перевода.")
-        return
-
-    # Счетчики для статистики
-    total = len(models_to_translate)
-    success = 0
-    failed = 0
-
-    # Получаем начальную модель для перевода
-    current_tr_model = "google/gemini-flash-2-0-experimental:free"
-
-    # Обновляем статус
-    await message.edit_text(
-        f"Начинаю перевод {total} описаний моделей.\n"
-        f"Текущая модель для перевода: {current_tr_model}"
-    )
-
-    # Переводим каждое описание
-    for model_data in models_to_translate:
-        current_model_id = model_data[0]
-        description = model_data[1]
-
-        # Переводим описание, передавая экземпляр БД для возможного переключения моделей
-        translated = await translate_with_openrouter(description, db, current_tr_model)
-
-        if translated:
-            # Обновляем описание в БД
-            if db.update_model_description(current_model_id, translated):
-                success += 1
-            else:
-                failed += 1
-        else:
-            failed += 1
-
-            # Пробуем получить следующую модель при ошибке
-            next_tr_model = get_next_free_model(db, current_tr_model)
-            if next_tr_model and next_tr_model != current_tr_model:
-                current_tr_model = next_tr_model
-                logger.info(f"Модель для перевода изменена на: {current_tr_model}")
-
-        # Обновляем статус каждые 3 модели или на последней модели
-        if (success + failed) % 3 == 0 or (success + failed) == total:
-            await message.edit_text(
-                f"Перевод моделей: {success + failed}/{total}\n"
-                f"✅ Успешно: {success}\n"
-                f"❌ Ошибок: {failed}\n"
-                f"Текущая модель для перевода: {current_tr_model}"
-            )
-
-        # Делаем паузу, чтобы не перегружать API
-        await asyncio.sleep(2)
-
-    # Финальный отчет
-    await message.edit_text(
-        f"Перевод завершен!\n"
-        f"Всего моделей: {total}\n"
-        f"✅ Успешно переведено: {success}\n"
-        f"❌ Ошибок: {failed}"
-    )
 
 
 async def translate_descriptions(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -348,7 +316,11 @@ async def translate_descriptions(update: Update, context: ContextTypes.DEFAULT_T
     failed = 0
 
     # Получаем начальную модель для перевода
-    current_tr_model = "google/gemini-flash-2-0-experimental:free"
+    current_tr_model = select_translation_model(db)
+
+    if not current_tr_model:
+        await message.edit_text("⚠️ Не удалось найти подходящую модель для перевода.")
+        return
 
     # Обновляем статус
     await message.edit_text(
@@ -357,7 +329,7 @@ async def translate_descriptions(update: Update, context: ContextTypes.DEFAULT_T
     )
 
     # Переводим каждое описание
-    for model_data in models_to_translate:
+    for i, model_data in enumerate(models_to_translate):
         current_model_id = model_data[0]
         description = model_data[1]
 
@@ -366,27 +338,42 @@ async def translate_descriptions(update: Update, context: ContextTypes.DEFAULT_T
             failed += 1
             continue
 
-        # Переводим описание, передавая экземпляр БД для возможного переключения моделей
-        translated = await translate_with_openrouter(description, db, current_tr_model)
+        # Формируем запрос на перевод
+        original_prompt = f"""Переведи следующее описание AI модели с английского на русский язык.
+Сохрани форматирование и технические термины, но сделай текст понятным русскоязычному пользователю:
 
-        if translated:
-            logger.info(f"Перевод для модели {current_model_id} получен: {translated[:50]}...")
-            # Обновляем описание в БД
-            if db.update_model_description(current_model_id, translated):
-                success += 1
-                logger.info(f"Перевод для модели {current_model_id} успешно сохранен")
+{description}"""
+
+        try:
+            # Пробуем получить перевод
+            translated = await generate_ai_response(
+                original_prompt,
+                current_tr_model,
+                stream=False
+            )
+
+            if translated:
+                logger.info(f"Перевод для модели {current_model_id} получен: {translated[:50]}...")
+                # Обновляем описание в БД
+                if db.set_model_description_ru(current_model_id, translated):
+                    success += 1
+                    logger.info(f"Перевод для модели {current_model_id} успешно сохранен")
+                else:
+                    failed += 1
+                    logger.error(f"Не удалось сохранить перевод для модели {current_model_id}")
             else:
                 failed += 1
-                logger.error(f"Не удалось сохранить перевод для модели {current_model_id}")
-        else:
-            failed += 1
-            logger.error(f"Не удалось получить перевод для модели {current_model_id}")
+                logger.error(f"Не удалось получить перевод для модели {current_model_id}")
 
-            # Пробуем получить следующую модель при ошибке
-            next_tr_model = get_next_free_model(db, current_tr_model)
-            if next_tr_model and next_tr_model != current_tr_model:
-                current_tr_model = next_tr_model
-                logger.info(f"Модель для перевода изменена на: {current_tr_model}")
+                # Пробуем получить следующую модель при ошибке
+                next_tr_model = get_next_free_model(db, current_tr_model)
+                if next_tr_model and next_tr_model != current_tr_model:
+                    current_tr_model = next_tr_model
+                    logger.info(f"Модель для перевода изменена на: {current_tr_model}")
+
+        except Exception as e:
+            logger.error(f"Ошибка при переводе модели {current_model_id}: {e}")
+            failed += 1
 
         # Обновляем статус каждые 3 модели или на последней модели
         if (success + failed) % 3 == 0 or (success + failed) == total:
@@ -407,6 +394,21 @@ async def translate_descriptions(update: Update, context: ContextTypes.DEFAULT_T
         f"✅ Успешно переведено: {success}\n"
         f"❌ Ошибок: {failed}"
     )
+
+
+async def translate_all_models(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    Переводит описания всех моделей на русский язык.
+    Это альтернативное имя для функции translate_descriptions, но без указания модели.
+    """
+    # Проверяем, является ли пользователь админом
+    user_id = update.effective_user.id
+    if str(user_id) not in config.ADMIN_IDS:
+        await update.message.reply_text("⚠️ Эта команда доступна только администраторам.")
+        return
+
+    # Вызываем основную функцию перевода без указания конкретной модели
+    await translate_descriptions(update, context)
 
 
 def get_next_free_model(db, current_model_id):

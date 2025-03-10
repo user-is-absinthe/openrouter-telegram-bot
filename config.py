@@ -1,8 +1,8 @@
 # config.py
 
 # Токены и ключи API
-TELEGRAM_BOT_TOKEN = "213"
-OPENROUTER_API_KEY = "123"
+TELEGRAM_BOT_TOKEN = "123"
+OPENROUTER_API_KEY = "213"
 
 DB_PATH = r"data/openrouter_bot.db"
 
@@ -14,6 +14,6 @@ SITE_NAME = "OpenRouter Telegram Bot"
 STREAM_UPDATE_INTERVAL = 1.5  # Интервал обновления сообщений в секундах при потоковой передаче
 
 # Добавляем поле для ID администраторов (список строк)
-ADMIN_IDS = ["123", "123"]
+ADMIN_IDS = ["1", "2", "3"]
 # ADMIN_IDS = ["YOUR_ADMIN_ID_2"]
 

@@ -48,6 +48,7 @@ class DBHandler:
                 last_name TEXT,
                 username TEXT,
                 register_date DATETIME DEFAULT CURRENT_TIMESTAMP,
+                is_premium INTEGER DEFAULT 0,
                 UNIQUE(id_chat, id_user)
             )
             ''')
@@ -142,6 +143,20 @@ class DBHandler:
                 )
                 ''')
                 self.conn.commit()
+
+            # Проверяем, существует ли колонка 'is_premium' в таблице 'users'
+            cursor.execute("PRAGMA table_info(users)")
+            columns = [column[1] for column in cursor.fetchall()]
+
+            if 'is_premium' not in columns:
+                logger.info("Добавление колонки 'is_premium' в таблицу 'users'")
+                cursor.execute("ALTER TABLE users ADD COLUMN is_premium INTEGER DEFAULT 0")
+                self.conn.commit()
+
+                # Устанавливаем значение по умолчанию для существующих записей
+                cursor.execute("UPDATE users SET is_premium = 0 WHERE is_premium IS NULL")
+                self.conn.commit()
+
         except Exception as e:
             logger.error(f"Ошибка обновления схемы базы данных: {e}")
 
@@ -150,31 +165,39 @@ class DBHandler:
         if self.conn:
             self.conn.close()
 
-    def register_user(self, id_chat, id_user, first_name, last_name, username):
+    def register_user(self, id_chat, id_user, first_name, last_name, username, is_premium=None):
         """Регистрирует пользователя или обновляет его информацию."""
         try:
             cursor = self.conn.cursor()
 
             # Проверка, существует ли пользователь
-            cursor.execute("SELECT id FROM users WHERE id_chat = ? AND id_user = ?", (id_chat, id_user))
+            cursor.execute("SELECT id, is_premium FROM users WHERE id_chat = ? AND id_user = ?", (id_chat, id_user))
             result = cursor.fetchone()
 
             if result:
                 # Обновление существующего пользователя
+                # Если is_premium не указан, сохраняем текущее значение
+                current_premium = result[1] if is_premium is None else is_premium
+
                 cursor.execute(
-                    "UPDATE users SET first_name = ?, last_name = ?, username = ? WHERE id_chat = ? AND id_user = ?",
-                    (first_name, last_name, username, id_chat, id_user)
+                    "UPDATE users SET first_name = ?, last_name = ?, username = ?, is_premium = ? WHERE id_chat = ? AND id_user = ?",
+                    (first_name, last_name, username, current_premium, id_chat, id_user)
                 )
             else:
                 # Регистрация нового пользователя
+                # По умолчанию не премиум
+                premium_status = 0 if is_premium is None else (1 if is_premium else 0)
+
                 cursor.execute(
-                    "INSERT INTO users (id_chat, id_user, first_name, last_name, username) VALUES (?, ?, ?, ?, ?)",
-                    (id_chat, id_user, first_name, last_name, username)
+                    "INSERT INTO users (id_chat, id_user, first_name, last_name, username, is_premium) VALUES (?, ?, ?, ?, ?, ?)",
+                    (id_chat, id_user, first_name, last_name, username, premium_status)
                 )
 
             self.conn.commit()
+            return True
         except Exception as e:
             logger.error(f"Ошибка при регистрации пользователя: {e}")
+            return False
 
     def log_dialog(self, id_chat, id_user, number_dialog, model, model_id, user_ask, model_answer=None, displayed=1):
         """Логирует диалог."""
@@ -381,6 +404,20 @@ class DBHandler:
             logger.error(f"Ошибка при получении списка моделей: {e}")
             return []
 
+    def set_model_description_ru(self, model_id, rus_description):
+        """Обновляет русское описание модели."""
+        try:
+            cursor = self.conn.cursor()
+            cursor.execute(
+                "UPDATE models SET rus_description = ? WHERE id = ?",
+                (rus_description, model_id)
+            )
+            self.conn.commit()
+            return True
+        except Exception as e:
+            logger.error(f"Ошибка при обновлении русского описания модели {model_id}: {e}")
+            return False
+
     def update_model_description(self, model_id, rus_description, top_model=None):
         """Обновляет русское описание и/или статус топ-модели."""
         try:
@@ -416,51 +453,36 @@ class DBHandler:
             logger.error(f"Ошибка при сбросе статуса топ-моделей: {e}")
             return False
 
-    def translate_model_descriptions(self, model_id=None):
+    def get_models_for_translation(self, model_id=None):
         """
-        Переводит описания моделей на русский язык, если поле rus_description пусто.
+        Получает список моделей для перевода.
 
         Args:
-            model_id: ID конкретной модели для перевода или None для всех моделей с пустым rus_description
+            model_id: ID конкретной модели или None для всех моделей без русского описания
 
         Returns:
-            Словарь с результатами перевода {model_id: status}
+            Список кортежей (id, description) моделей для перевода
         """
         try:
             cursor = self.conn.cursor()
 
             if model_id:
-                # Переводим конкретную модель
+                # Получаем конкретную модель
                 cursor.execute(
                     "SELECT id, description FROM models WHERE id = ?",
                     (model_id,)
                 )
             else:
-                # Ищем все модели с пустым rus_description
+                # Получаем все модели с пустым русским описанием
                 cursor.execute(
                     "SELECT id, description FROM models WHERE rus_description IS NULL OR rus_description = ''"
                 )
 
-            models_to_translate = cursor.fetchall()
-
-            results = {}
-            for model_data in models_to_translate:
-                model_id = model_data[0]
-                description = model_data[1]
-
-                if not description:
-                    results[model_id] = "no_description"
-                    continue
-
-                # Эта функция будет реализована в основном файле бота
-                # Здесь она будет вызываться извне
-                results[model_id] = "pending"
-
-            return results
+            return cursor.fetchall()
 
         except Exception as e:
-            logger.error(f"Ошибка при подготовке к переводу описаний моделей: {e}")
-            return {}
+            logger.error(f"Ошибка при получении моделей для перевода: {e}")
+            return []
 
     def get_dialog_history(self, id_user, number_dialog, limit=None):
         """
@@ -515,3 +537,116 @@ class DBHandler:
             logger.error(f"Ошибка при получении истории диалога: {e}")
             return []
 
+    def set_premium_status(self, user_id, is_premium=True):
+        """
+        Устанавливает или снимает премиум-статус пользователя.
+
+        Args:
+            user_id: ID пользователя
+            is_premium: True для установки премиум, False для снятия
+
+        Returns:
+            bool: True при успешном обновлении, False при ошибке
+        """
+        try:
+            cursor = self.conn.cursor()
+            cursor.execute(
+                "UPDATE users SET is_premium = ? WHERE id_user = ?",
+                (1 if is_premium else 0, user_id)
+            )
+            self.conn.commit()
+            return True
+        except Exception as e:
+            logger.error(f"Ошибка при обновлении премиум-статуса пользователя {user_id}: {e}")
+            return False
+
+    def is_premium_user(self, user_id):
+        """
+        Проверяет, является ли пользователь премиум-пользователем.
+
+        Args:
+            user_id: ID пользователя
+
+        Returns:
+            bool: True, если пользователь имеет премиум-статус, иначе False
+        """
+        try:
+            cursor = self.conn.cursor()
+            cursor.execute(
+                "SELECT is_premium FROM users WHERE id_user = ?",
+                (user_id,)
+            )
+            result = cursor.fetchone()
+            if result:
+                return bool(result[0])
+            return False
+        except Exception as e:
+            logger.error(f"Ошибка при проверке премиум-статуса пользователя {user_id}: {e}")
+            return False
+
+    def check_user_exists_by_id(self, user_id):
+        """
+        Проверяет, существует ли пользователь с указанным ID.
+
+        Args:
+            user_id: ID пользователя
+
+        Returns:
+            bool: True, если пользователь существует, иначе False
+        """
+        try:
+            cursor = self.conn.cursor()
+            cursor.execute("SELECT 1 FROM users WHERE id_user = ? LIMIT 1", (user_id,))
+            return cursor.fetchone() is not None
+        except Exception as e:
+            logger.error(f"Ошибка при проверке существования пользователя: {e}")
+            return False
+
+    def get_user_id_by_username(self, username):
+        """
+        Получает ID пользователя по его username.
+
+        Args:
+            username: имя пользователя (без символа @)
+
+        Returns:
+            int: ID пользователя или None, если пользователь не найден
+        """
+        try:
+            cursor = self.conn.cursor()
+            cursor.execute("SELECT id_user FROM users WHERE username = ? LIMIT 1", (username,))
+            result = cursor.fetchone()
+            return result[0] if result else None
+        except Exception as e:
+            logger.error(f"Ошибка при получении ID пользователя по username: {e}")
+            return None
+
+    def get_user_info(self, user_id):
+        """
+        Получает информацию о пользователе по его ID.
+
+        Args:
+            user_id: ID пользователя
+
+        Returns:
+            dict: Словарь с информацией о пользователе или None, если пользователь не найден
+        """
+        try:
+            cursor = self.conn.cursor()
+            cursor.execute(
+                "SELECT first_name, last_name, username, is_premium FROM users WHERE id_user = ?",
+                (user_id,)
+            )
+            result = cursor.fetchone()
+
+            if result:
+                return {
+                    'first_name': result[0],
+                    'last_name': result[1],
+                    'username': result[2],
+                    'is_premium': bool(result[3])
+                }
+            return None
+        except Exception as e:
+            logger.error(f"Ошибка при получении информации о пользователе: {e}")
+            return None
